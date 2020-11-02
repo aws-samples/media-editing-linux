@@ -1,0 +1,545 @@
+{
+  "AWSTemplateFormatVersion" : "2010-09-09",
+  "Description": "AWS FSx for Lustre & G4dn EC2 Deployment",
+  "Metadata": {
+    "Version" : "1.0",
+    "Internal": "demo",
+    "autoDeploy" : "no",
+    "CloudSave" : "ad/CloudFormation/FSxLustre",
+    "Region" : "us-west-2",
+    "Notes" : "This template provisions a FSx for Lustre file system and deploys a CentOS G4dn instance, installs KDE desktop, Teradici and Nvidia T4 Drivers.\n",
+    "Changelog" : "inital template",
+    "AWS::CloudFormation::Interface": {
+      "ParameterGroups": [
+          {
+            "Label": { "default": "Basic configuration" },
+            "Parameters": [ "key", "allowedIP", "AvailabilityZone" ]
+          },
+          {
+            "Label": { "default": "Instance Settings" },
+            "Parameters": [ "instanceType", "LinuxUser", "LinuxPassword", "FSxLustreSize", "TeradiciLicense" ]
+          }
+      ],
+      "ParameterLabels": {
+        "key": { "default": "Name of an existing EC2 KeyPair to enable SSH access:" },
+        "instanceType": { "default": "Instance Type:" },
+        "LinuxUser" : { "default" : "Enter a name for the Linux user:"},
+        "LinuxPassword" : { "default": "Enter a password for the Linux user:"}, 
+        "S3Bucket" : { "default" : "Enter the name of your S3 bucket:" },
+        "allowedIP" : { "default" : "Remote Access CIDR:" },
+        "AvailabilityZone": {"default" : "Availability Zone:"},
+        "FSxLustreSize": { "default": "Size of FSx Lustre filesystem:"},
+        "TeradiciLicense" : { "default": "Enter your Teradici license registration code:"}
+      }
+    }
+  },
+  "Parameters": {
+    "key": {
+      "Type": "AWS::EC2::KeyPair::KeyName",
+      "Description": "(AWS Mgmt Console EC2 -> NETWORK & SECURITY -> Key Pairs)",
+      "ConstraintDescription" : "must be the name of an existing EC2 KeyPair"
+    },
+    "AvailabilityZone" :{
+      "Type" : "AWS::EC2::AvailabilityZone::Name",
+      "Default" : "us-west-2a",
+      "Description" : "(Please enter your preferred AWS Availabilty Zone)"
+    },
+    "instanceType": {
+        "Type": "String",
+        "Default": "g4dn.4xlarge",
+        "AllowedValues": [ "g4dn.xlarge","g4dn.2xlarge","g4dn.4xlarge","g4dn.8xlarge","g4dn.12xlarge","g4dn.16xlarge" ],
+        "Description" : "(Recommended initial size: g4dn.4xlarge)",
+        "ConstraintDescription" : "must be a valid EC2 instance type"
+    },
+    "LinuxUser" : {
+      "Type" : "String",
+      "Default" : "admin",
+      "Description" : "(Choose a username)"
+  },
+    "LinuxPassword" : {
+        "Type" : "String",
+        "Description" : "(Choose a strong password)"
+    },
+    "TeradiciLicense" : {
+      "Type" : "String",
+      "Description" : "(Example Teradici CAS License code syntax: AB1CDEFGH2I3@JK12-LMN1-1NOP-QR12)"
+  },
+    "S3Bucket" : {
+        "Type" : "String",
+        "Default"  : "",
+        "Description" : "(Enter the name of the S3 Bucket that will be used as the source for the FSx for Lustre filesystem, Do not Enter S3:// Prefix, only bucket name.  )"
+    },
+    "allowedIP" : {
+      "Type" : "String",
+      "Default": "0.0.0.0/0",
+      "MinLength": "9",
+      "MaxLength": "18",
+      "AllowedPattern": "(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})/(\\d{1,2})",
+      "ConstraintDescription": "must be a valid CIDR range of the form x.x.x.x/x.",
+      "Description": "(CIDR allowed to remote access demo enviroment. Leave as 0.0.0.0/0 for anywhere IP access)"
+    },
+    "FSxLustreSize" : {
+        "Type" : "String",
+        "Default" : 1200,
+        "Description" : "(Enter 1200, 2400, or increments of 2400 in GB thereafter. Deployment will fail if size is not in increments of 2400GB."
+    }
+  },
+  "Resources" : {
+    "vpc" : {
+       "Type" : "AWS::EC2::VPC",
+       "Properties" : {
+         "CidrBlock" : "10.0.0.0/16",
+         "EnableDnsSupport" : "true",
+         "EnableDnsHostnames" : "true",
+         "InstanceTenancy" : "default",
+         "Tags" : [ {"Key" : "Name", "Value" : { "Fn::Join": [ "", [ "vpc (", { "Ref": "AWS::StackName" }, ")" ] ] } } ]
+       }
+    },
+    "internetGateway" : {
+       "Type" : "AWS::EC2::InternetGateway",
+       "Properties" : {
+          "Tags" : [ {"Key" : "Name", "Value" : { "Fn::Join": [ "", [ "igw (", { "Ref": "AWS::StackName" }, ")" ] ] } } ]
+       }
+    },
+    "attachGateway" : {
+      "Type" : "AWS::EC2::VPCGatewayAttachment",
+      "Properties" : {
+        "VpcId" : { "Ref" : "vpc" },
+        "InternetGatewayId" : { "Ref" : "internetGateway" }
+      }
+    },
+    "subnet" : {
+       "Type" : "AWS::EC2::Subnet",
+       "Properties" : {
+          "VpcId" : { "Ref" : "vpc" },
+          "CidrBlock" : "10.0.0.0/24",
+          "MapPublicIpOnLaunch" : "true",
+          "AvailabilityZone" : { "Ref" : "AvailabilityZone"},
+          "Tags" : [ {"Key" : "Name", "Value" : { "Fn::Join": [ "", [ "subnet (", { "Ref": "AWS::StackName" }, ")" ] ] } } ]
+       }
+    },
+    "routeTable" : {
+       "Type" : "AWS::EC2::RouteTable",
+       "Properties" : {
+          "VpcId" : { "Ref" : "vpc" },
+          "Tags" : [ {"Key" : "Name", "Value" : { "Fn::Join": [ "", [ "subnet route table (", { "Ref": "AWS::StackName" }, ")" ] ] } } ]
+       }
+    },
+    "subnetAssociation": {
+    "Type" : "AWS::EC2::SubnetRouteTableAssociation",
+    "Properties" : {
+      "RouteTableId" : {"Ref" : "routeTable"},
+      "SubnetId" : {"Ref" : "subnet"}
+      }
+    },
+    "route" : {
+       "Type" : "AWS::EC2::Route",
+       "Properties" : {
+          "RouteTableId" : { "Ref" : "routeTable" },
+          "DestinationCidrBlock" : "0.0.0.0/0",
+          "GatewayId" : { "Ref" : "internetGateway" }
+        }
+    },
+    "EC2SecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+        "Properties": {
+          "GroupDescription": "Access to GPU workstation",
+          "VpcId": { "Ref": "vpc" },
+          "SecurityGroupIngress" : [
+              { "IpProtocol" : "tcp", "FromPort" : "22", "ToPort" : "22", "CidrIp" : { "Ref" : "allowedIP"}, "Description" : "SSH Access to Host" },
+              { "IpProtocol" : "tcp", "FromPort" : "443", "ToPort" : "443", "CidrIp" : { "Ref" : "allowedIP"}, "Description" : "Teradici Client Authentication" },
+              { "IpProtocol" : "tcp", "FromPort" : "4172", "ToPort" : "4172", "CidrIp" : { "Ref" : "allowedIP"}, "Description" : "PCoIP Session Establishment" },
+              { "IpProtocol" : "udp", "FromPort" : "4172", "ToPort" : "4172", "CidrIp" : { "Ref" : "allowedIP"}, "Description" : "PCoIP Session Data" },
+              { "IpProtocol" : "tcp", "FromPort" : "60443", "ToPort" : "60443", "CidrIp" : { "Ref" : "allowedIP"}, "Description" : "Connection Broker Communication" }
+           ]
+        }
+   },
+   "LustreSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+        "Properties": {
+          "GroupDescription": "Lustre Security Group",
+          "VpcId": { "Ref": "vpc" }
+        }
+   },
+   "LustreSecurityInBound988a": {
+      "Type": "AWS::EC2::SecurityGroupIngress",
+        "Properties": {
+          "Description" : "Lustre Inbound 988",
+          "FromPort" : 988,
+          "GroupId" : { "Ref" : "LustreSecurityGroup"},
+          "IpProtocol" : "tcp",
+          "SourceSecurityGroupId" : { "Fn::GetAtt": [ "LustreSecurityGroup", "GroupId"]},
+          "ToPort" : 988
+        }
+   },
+   "LustreSecurityInBound988b": {
+      "Type": "AWS::EC2::SecurityGroupIngress",
+        "Properties": {
+          "Description" : "Lustre Inbound 988",
+          "FromPort" : 988,
+          "GroupId" : { "Ref" : "LustreSecurityGroup"},
+          "IpProtocol" : "tcp",
+          "SourceSecurityGroupId" : { "Fn::GetAtt": [ "EC2SecurityGroup", "GroupId"]},
+          "ToPort" : 988
+        }
+   },
+   "LustreSecurityInBound1021a": {
+      "Type": "AWS::EC2::SecurityGroupIngress",
+        "Properties": {
+          "Description" : "Lustre Inbound 1021-1023",
+          "FromPort" : 1021,
+          "GroupId" : { "Ref" : "LustreSecurityGroup"},
+          "IpProtocol" : "tcp",
+          "SourceSecurityGroupId" : { "Fn::GetAtt": [ "LustreSecurityGroup", "GroupId"]},
+          "ToPort" : 1023
+        }
+   },
+   "LustreSecurityInBound1021b": {
+      "Type": "AWS::EC2::SecurityGroupIngress",
+        "Properties": {
+          "Description" : "Lustre Inbound 1021-1023",
+          "FromPort" : 1021,
+          "GroupId" : { "Ref" : "LustreSecurityGroup"},
+          "IpProtocol" : "tcp",
+          "SourceSecurityGroupId" : { "Fn::GetAtt": [ "EC2SecurityGroup", "GroupId"]},
+          "ToPort" : 1023
+        }
+   },
+  "LinuxInstance": {
+     "Type": "AWS::EC2::Instance",
+     "DependsOn" : "DeployFSX",
+     "Properties": {
+       "InstanceType": { "Ref" : "instanceType"},
+       "InstanceInitiatedShutdownBehavior": "terminate",
+       "Tags": [ { "Key": "Name", "Value": { "Fn::Join": [ "", [ { "Ref" : "AWS::StackName"}, " (starting)" ] ] } } ],
+       "KeyName": { "Ref" : "key"},
+       "ImageId": { "Ref" : "CentOSAmi" },
+       "IamInstanceProfile" : { "Ref" : "LinuxInstanceProfile" },
+       "NetworkInterfaces": [
+         {
+             "AssociatePublicIpAddress": "true",
+             "DeviceIndex": "0",
+             "GroupSet": [ { "Ref" : "EC2SecurityGroup" } ],
+             "SubnetId":{ "Ref":"subnet" }
+         }
+       ],
+       "BlockDeviceMappings" : [
+          {
+             "DeviceName" : "/dev/sda1",
+             "Ebs" : {
+                "VolumeType" : "gp2",
+                "DeleteOnTermination" : "true",
+                "VolumeSize" : "50"
+             }
+          }
+       ],
+       "UserData": {
+           "Fn::Base64": {
+             "Fn::Join": [
+               "",
+               [
+                "#!/bin/bash\n",
+                "shopt -s histappend\n",
+                "region=", { "Ref" : "AWS::Region" }, "\n",
+                "name=\"", { "Fn::Join": [ "", [ { "Ref" : "AWS::StackName" }, "" ] ] }, "\"\n",
+                "SignalURL=\"", { "Ref" : "DeploymentCompleteHandle" }, "\"\n",
+                "instance=$(curl http://169.254.169.254/latest/meta-data/instance-id)\n",
+                "stackname=", { "Ref" : "AWS::StackName" }, "\n",
+                "LinuxUser=", { "Ref" : "LinuxUser" }, "\n",
+                "file=/home/centos/reboot\n",
+                "if [[ -f $file ]]; then\n",
+                "  init 3\n",
+                  
+                "  /root/.local/bin/aws s3 cp --recursive s3://ec2-linux-nvidia-drivers/g4/latest/ /home/centos/.\n",
+                "  chmod +x /home/centos/NVIDIA-Linux-x86_64*.run\n",
+                  
+                "  echo Install kernel-devel\n",
+                "  yum install -y gcc kernel-devel-$(uname -r)\n",
+                "  yum install -y libglvnd-devel\n",
+                "  /root/.local/bin/aws ec2 create-tags --resources ${instance} --tags \"Key=Name,Value=${name} (installing NVIDIA)\" --region $region\n",
+                "  /bin/sh /home/centos/NVIDIA-Linux-x86_64*.run -s\n",
+                  
+                "  /root/.local/bin/aws ec2 create-tags --resources ${instance} --tags \"Key=Name,Value=${name} (installing Teradici)\" --region $region\n",
+                "  # import the Teradici signing key\n",
+                "  sudo rpm --import https://downloads.teradici.com/rhel/teradici.pub.gpg\n",
+
+                "  # grab the PCoIP repo file\n",
+                "  sudo curl -o /etc/yum.repos.d/pcoip.repo https://downloads.teradici.com/rhel/pcoip.repo\n",
+
+                "  # install PCoIP agent package\n",
+                "  sudo yum install pcoip-agent-graphics -y\n",
+
+                "  # load vhci-hcd kernel modules\n",
+                "  sudo modprobe -a usb-vhci-hcd usb-vhci-iocifc\n",
+
+                "  # register with the licensing service\n",
+                "  pcoip-register-host --registration-code=", { "Ref" : "TeradiciLicense"}, "\n",
+
+                "  # make sure you're running latest pcoip-agent version\n",
+                "  sudo yum update pcoip-agent-graphics\n",
+                "  /root/.local/bin/aws ec2 create-tags --resources ${instance} --tags \"Key=Name,Value=${name} (deployed)\" --region $region\n",
+                "  curl -X PUT -H 'Content-Type:' --data-binary '{\"Status\" : \"SUCCESS\",\"Reason\" : \"Deployment Complete\",\"UniqueId\" : \"ID1234\",\"Data\" : \"Deployment Complete\"}' \"${SignalURL}\"\n",
+                "  echo finished\n",
+                "  reboot\n",
+                "else\n",
+                "  LinuxPassword=", { "Ref" : "LinuxPassword" }, "\n",
+                "  /root/.local/bin/aws ec2 create-tags --resources ${instance} --tags \"Key=Name,Value=${name} (yum updating)\" --region $region\n",
+                "  yum update -y\n",
+                "  yum install -y wget nano unzip epel-release mesa-libGL mesa-libGLU htop screen\n",
+                "  yum install -y python-pip\n",
+                "  pip install --upgrade pip\n",
+                "  pip install awscli --upgrade --user\n",
+
+                "  /root/.local/bin/aws ec2 create-tags --resources ${instance} --tags \"Key=Name,Value=${name} (installing KDE)\" --region $region\n",
+                "  # install the \"Server with GUI\" group\n",
+                "  yum groupinstall \"Server with GUI\" -y\n",
+
+                "  # prefer KDE desktop? (optional)\n",
+                "  yum groupinstall -y \"KDE Plasma Workspaces\"\n",
+                "  systemctl set-default graphical.target\n",
+
+                "  #check to see if X server is running\n",
+                "  export DISPLAY=:0\n",
+                "  if ! xset q &>/dev/null; then\n",
+                "      echo \"$script_basename: ERROR: NO X server\" >&2\n",
+                "  else\n",
+                "      echo \"$script_basename: X server running\"\n",
+                "  fi\n",
+
+                "  /root/.local/bin/aws ec2 create-tags --resources ${instance} --tags \"Key=Name,Value=${name} (installing software)\" --region $region\n",
+                "  yum install -y libpng12 mesa-libGLw libXp gamin audiofile audiofile-devel e2fsprogs-libs tcsh compat-libtiff3\n",
+                "  yum install -y xorg-x11-fonts-ISO8859-1-100dpi xorg-x11-fonts-ISO8859-1-75dpi\n",
+                "  yum install -y liberation-mono-fonts liberation-fonts-common liberation-sans-fonts liberation-serif-fonts\n",
+                "  yum install -y https://download1.rpmfusion.org/free/el/rpmfusion-free-release-7.noarch.rpm\n",
+                "  yum install -y vlc calligra-krita\n",
+                "  wget https://dl.google.com/linux/direct/google-chrome-stable_current_x86_64.rpm\n",
+                "  yum install -y ./google-chrome-stable_current_*.rpm\n",
+                "  rm -f google-chrome-stable_current_*.rpm\n",
+                "  /root/.local/bin/aws ec2 create-tags --resources ${instance} --tags \"Key=Name,Value=${name} (installing FSx Drivers)\" --region $region\n",
+                  
+                "  wget https://fsx-lustre-client-repo-public-keys.s3.amazonaws.com/fsx-rpm-public-key.asc -O /tmp/fsx-rpm-public-key.asc\n",
+                "  rpm --import /tmp/fsx-rpm-public-key.asc\n",
+                "  wget https://fsx-lustre-client-repo.s3.amazonaws.com/el/7/fsx-lustre-client.repo -O /etc/yum.repos.d/aws-fsx.repo\n",
+                "  yum install -y kmod-lustre-client lustre-client\n",
+
+                "  # remove any old NVIDIA drivers/CUDA\n",
+                "  yum erase nvidia cuda\n",
+
+                "  # install kernel-devel - for GPU drivers\n",
+                "  yum install -y gcc kernel-devel-$(uname -r)\n",
+
+                "  # paste the following lines in one go into your shell\n",
+                "  echo blacklist vga16fb | tee --append /etc/modprobe.d/blacklist.conf\n",
+                "  echo blacklist nouveau | tee --append /etc/modprobe.d/blacklist.conf\n",
+                "  echo blacklist rivafb | tee --append /etc/modprobe.d/blacklist.conf\n",
+                "  echo blacklist nvidiafb | tee --append /etc/modprobe.d/blacklist.conf\n",
+                "  echo blacklist rivatv | tee --append /etc/modprobe.d/blacklist.conf\n",
+
+                "  # edit the /etc/default/grub file and add the line:\n",
+                "  echo \"GRUB_CMDLINE_LINUX=\"rdblacklist=nouveau\"\" >> /etc/default/grub\n",
+
+                "  # rebuild grub2 config\n",
+                "  grub2-mkconfig -o /boot/grub2/grub.cfg\n",
+                  
+                "  /root/.local/bin/aws ec2 create-tags --resources ${instance} --tags \"Key=Name,Value=${name} (set fsx disk)\" --region $region\n",
+
+                "  adduser $LinuxUser\n",
+                "  echo \"$LinuxPassword\" | passwd $LinuxUser --stdin\n",
+                "  usermod -aG wheel $LinuxUser\n",
+                "  attacheddisks=$(lsblk -o NAME,FSTYPE -dsn | awk '$2 == \"\" {print $1}')\n",
+                "  disknum=1\n",
+                "  for disk in $attacheddisks; do\n",
+                "    mkdir /mnt/nvme$disknum\n",
+                "    mkfs.xfs /dev/$disk\n",
+                "    echo \"/dev/$disk  /mnt/nvme$disknum xfs defaults 0 0\" >> /etc/fstab\n",
+                "    chown $LinuxUser /mnt/nvme$disknum -R\n",
+                "    ((disknum++))\n",
+                "  done\n",
+                "  mkdir /mnt/fsx\n",
+                "  chown $LinuxUser /mnt/fsx -R\n",
+
+                "  echo \"", { "Ref" : "DeployFSX" }, ".fsx.$region.amazonaws.com@tcp:/", { "Fn::GetAtt" : [ "DeployFSX", "LustreMountName" ] }, " /mnt/fsx lustre defaults,noatime,flock,_netdev 0 0\" >> /etc/fstab\n",
+                "  /root/.local/bin/aws ec2 create-tags --resources ${instance} --tags \"Key=Name,Value=${name} (rebooting)\" --region $region\n",
+                "  needs-restarting -r || \n{\n  rm -f /var/lib/cloud/instances/*/sem/config_scripts_user\n  echo rebooting ... $(date) >> /home/centos/reboot\n  reboot\n  exit\n}\n",
+                "fi\n"
+               ]
+             ]
+           }
+         }
+       }
+  },
+  "DeploymentCompleteHandle" : {
+     "Type" : "AWS::CloudFormation::WaitConditionHandle"
+   },
+   "DeploymentComplete" : {
+     "Type" : "AWS::CloudFormation::WaitCondition",
+     "Properties" : {
+       "Handle"  : { "Ref" : "DeploymentCompleteHandle" },
+       "Timeout" : "43200"
+     }
+   },
+   "LinuxInstanceProfile": {
+     "Type": "AWS::IAM::InstanceProfile",
+     "DeletionPolicy": "Delete",
+     "Properties": {
+       "Path": "/",
+       "Roles": [ { "Ref": "EC2Role" } ] }
+   },
+   "EC2Role": {
+     "Type": "AWS::IAM::Role",
+     "DeletionPolicy" : "Delete",
+     "Properties": {
+       "AssumeRolePolicyDocument": {
+         "Statement": [ {
+           "Action": [ "sts:AssumeRole" ],
+           "Effect": "Allow",
+           "Principal": { "Service": [ "ec2.amazonaws.com" ] }
+         }
+         ],
+         "Version": "2012-10-17"
+       }
+     }
+   },
+   "EC2Policy": {
+     "Type": "AWS::IAM::Policy",
+     "DeletionPolicy" : "Delete",
+     "Properties": {
+       "PolicyName": { "Fn::Join": [ "", [ "EC2-admin-role-", { "Ref" : "AWS::StackName" } ] ] },
+       "Roles": [ { "Ref": "EC2Role" } ],
+       "PolicyDocument": {
+         "Version": "2012-10-17",
+         "Statement": [
+           {
+             "Action": "ec2:*",
+             "Effect": "Allow",
+             "Resource": "*"
+           },
+           {
+             "Action": "sns:*",
+             "Effect": "Allow",
+             "Resource": "*"
+           },
+           {
+             "Action": "fsx:*",
+             "Effect": "Allow",
+             "Resource": "*"
+           },
+           {
+             "Action": "cloudformation:*",
+             "Effect": "Allow",
+             "Resource": "*"
+           },
+           {
+              "Action": "s3:*",
+              "Effect": "Allow",
+              "Resource": "*"
+            }
+         ]
+       }
+     }
+   },
+   "DescribeImagesRole": {
+     "Type": "AWS::IAM::Role",
+     "Properties": {
+       "AssumeRolePolicyDocument": {
+         "Version": "2012-10-17",
+         "Statement": [
+           {
+             "Action": "sts:AssumeRole",
+             "Effect": "Allow",
+             "Principal": {
+               "Service": "lambda.amazonaws.com"
+             }
+           }
+         ]
+       },
+       "ManagedPolicyArns": [
+         "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+       ],
+       "Policies": [
+         {
+           "PolicyName": "DescribeImages",
+           "PolicyDocument": {
+             "Version": "2012-10-17",
+             "Statement": [
+               {
+                 "Action": "ec2:DescribeImages",
+                 "Effect": "Allow",
+                 "Resource": "*"
+               }
+             ]
+           }
+         }
+       ]
+     }
+   },
+   "GetLatestAMI": {
+     "Type": "AWS::Lambda::Function",
+     "Properties": {
+       "Runtime": "python3.6",
+       "Handler": "index.handler",
+       "Role": { "Fn::Sub": "${DescribeImagesRole.Arn}" },
+       "Timeout": 60,
+       "Code": {
+         "ZipFile": { "Fn::Join": [ 
+           "", 
+           [ 
+            "import boto3\n",
+            "import cfnresponse\n",
+            "import json\n",
+            "import traceback\n\n",
+            "def handler(event, context):\n",
+            "  try:\n",
+            "    response = boto3.client('ec2').describe_images(\n",
+            "        Owners=[event['ResourceProperties']['Owner']],\n",
+            "        Filters=[\n",
+            "          {'Name': 'name', 'Values': [event['ResourceProperties']['Name']]},\n",
+            "          {'Name': 'architecture', 'Values': [event['ResourceProperties']['Architecture']]},\n",
+            "          {'Name': 'root-device-type', 'Values': ['ebs']},\n",
+            "        ],\n",
+            "    )\n\n",
+            "    amis = sorted(response['Images'],\n",
+            "                  key=lambda x: x['CreationDate'],\n",
+            "                  reverse=True)\n",
+            "    id = amis[0]['ImageId']\n\n",
+            "    cfnresponse.send(event, context, cfnresponse.SUCCESS, {}, id)\n",
+            "  except:\n",
+            "    traceback.print_last()\n",
+            "    cfnresponse.send(event, context, cfnresponse.FAIL, {}, \"ok\")\n"
+           ] 
+           ] 
+          }
+       }
+     }
+   },
+   "CentOSAmi": {
+     "Type": "Custom::FindAMI",
+     "Properties": {
+       "ServiceToken": { "Fn::Sub" : "${GetLatestAMI.Arn}" },
+       "Owner": "679593333241",
+       "Name": "CentOS Linux 7 x86_64 HVM EBS *",
+       "Architecture": "x86_64"
+     }
+   },
+    "DeployFSX": {
+      "Type" : "AWS::FSx::FileSystem",
+      "Properties" : {
+          "FileSystemType" : "LUSTRE",
+          "Tags": [
+              {
+                  "Key": "Name",
+                  "Value": { "Ref" : "AWS::StackName" }
+              }
+          ],
+          "LustreConfiguration" : {
+              "DeploymentType" : "SCRATCH_2",
+              "ImportPath" : { "Fn::Join": [ "", [ "s3://", { "Ref": "S3Bucket" } ] ] },
+              "ExportPath" : { "Fn::Join": [ "", [ "s3://", { "Ref": "S3Bucket" } ] ] }
+            },
+          "SecurityGroupIds" : [{ "Fn::GetAtt" : [ "LustreSecurityGroup", "GroupId" ] }],
+          "StorageCapacity" : { "Ref" : "FSxLustreSize"},
+          "SubnetIds" : [{ "Ref": "subnet" }]
+        }
+    }
+ }     
+}
