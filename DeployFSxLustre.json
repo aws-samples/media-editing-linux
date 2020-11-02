@@ -3,10 +3,6 @@
   "Description": "AWS FSx for Lustre & G4dn EC2 Deployment",
   "Metadata": {
     "Version" : "1.0",
-    "Internal": "demo",
-    "autoDeploy" : "no",
-    "CloudSave" : "ad/CloudFormation/FSxLustre",
-    "Region" : "us-west-2",
     "Notes" : "This template provisions a FSx for Lustre file system and deploys a CentOS G4dn instance, installs KDE desktop, Teradici and Nvidia T4 Drivers.\n",
     "Changelog" : "inital template",
     "AWS::CloudFormation::Interface": {
